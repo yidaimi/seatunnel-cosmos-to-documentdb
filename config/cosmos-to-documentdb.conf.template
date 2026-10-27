@@ -1,0 +1,47 @@
+# Azure Cosmos DB for MongoDB  ->  Amazon DocumentDB
+# Full snapshot followed by change stream (incremental). Replace every <...> placeholder.
+
+env {
+  # One collection is always read by a single reader; parallelism > number of collections
+  # only leaves readers idle.
+  parallelism = 2
+  job.mode = "STREAMING"
+  # Change stream positions are persisted on every checkpoint.
+  checkpoint.interval = 10000
+}
+
+source {
+  CosmosMongo {
+    # Primary connection string from the Azure portal (Connection strings blade).
+    uri = "mongodb://<account>:<primary-key>@<account>.mongo.cosmos.azure.com:10255/?ssl=true&replicaSet=globaldb&retrywrites=false&maxIdleTimeMS=120000&appName=@<account>@"
+    database = "<source-database>"
+    # Optional, all collections when omitted
+    # collections = ["orders", "users"]
+
+    # initial | snapshot | incremental
+    startup.mode = "initial"
+    # cosmos_ru: Cosmos DB for MongoDB RU account (no delete events)
+    # standard : Cosmos DB for MongoDB vCore / regular MongoDB (deletes are synced)
+    change_stream.mode = "cosmos_ru"
+    # Server-side wait per empty getMore. Each empty getMore costs ~2 RU on Cosmos RU,
+    # so a longer wait lowers the idle cost.
+    change_stream.max_await_ms = 1000
+
+    snapshot.fetch_size = 1000
+    poll.batch_size = 1024
+    # Cosmos RU throttles with error 16500; reads are retried with exponential back-off.
+    max_retries = 10
+    retry_backoff_ms = 1000
+  }
+}
+
+sink {
+  DocumentDB {
+    uri = "mongodb://<user>:<password>@<cluster>.cluster-xxxx.<region>.docdb.amazonaws.com:27017/?tls=true&replicaSet=rs0&readPreference=secondaryPreferred&retryWrites=false"
+    # Optional: target database name, defaults to the source database name
+    # database = "<target-database>"
+    tls_ca_file = "/home/ec2-user/global-bundle.pem"
+    batch_size = 1000
+    batch_interval_ms = 1000
+  }
+}

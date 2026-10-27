@@ -1,0 +1,2 @@
+org.apache.seatunnel.connectors.seatunnel.cosmosmongo.source.CosmosMongoSourceFactory
+org.apache.seatunnel.connectors.seatunnel.cosmosmongo.sink.DocumentDBSinkFactory

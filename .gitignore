@@ -1,0 +1,14 @@
+# Build output
+target/
+
+# Job configs with real credentials (keep them local only)
+test/job-cosmos-docdb.conf
+test/job-local-to-docdb.conf
+*.secret.conf
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+*.log

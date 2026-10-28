@@ -18,26 +18,28 @@
 package org.apache.seatunnel.connectors.seatunnel.cosmosmongo.sink;
 
 import org.apache.seatunnel.api.sink.SinkWriter;
+import org.apache.seatunnel.api.table.type.RowKind;
 import org.apache.seatunnel.api.table.type.SeaTunnelRow;
 import org.apache.seatunnel.connectors.seatunnel.cosmosmongo.common.BsonCodec;
 import org.apache.seatunnel.connectors.seatunnel.cosmosmongo.common.MongoClientFactory;
+import org.apache.seatunnel.connectors.seatunnel.cosmosmongo.config.WriteMode;
 import org.apache.seatunnel.connectors.seatunnel.cosmosmongo.exception.CosmosMongoConnectorException;
 
+import org.bson.BsonArray;
 import org.bson.BsonDocument;
 import org.bson.BsonValue;
 
 import com.mongodb.MongoBulkWriteException;
 import com.mongodb.MongoException;
 import com.mongodb.MongoNamespace;
+import com.mongodb.bulk.BulkWriteError;
 import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoCollection;
 import com.mongodb.client.model.BulkWriteOptions;
-import com.mongodb.client.model.DeleteOneModel;
-import com.mongodb.client.model.ReplaceOneModel;
-import com.mongodb.client.model.ReplaceOptions;
+import com.mongodb.client.model.InsertManyOptions;
 import com.mongodb.client.model.WriteModel;
 import lombok.extern.slf4j.Slf4j;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -46,25 +48,35 @@ import java.util.Optional;
 import static org.apache.seatunnel.connectors.seatunnel.cosmosmongo.exception.CosmosMongoConnectorException.ErrorCode.WRITE_FAILED;
 
 /**
- * Applies rows to DocumentDB: INSERT / UPDATE_AFTER become {@code replaceOne(_id, doc,
- * upsert)}, DELETE becomes {@code deleteOne(_id)}, UPDATE_BEFORE is ignored.
+ * Applies rows to DocumentDB. INSERT / UPDATE_AFTER carry the full document, DELETE removes it,
+ * UPDATE_BEFORE is ignored. Rows are buffered per collection in a {@link WriteBatch} and applied
+ * according to {@link WriteMode}:
  *
- * <p>Every operation is idempotent, so a failed bulk write is simply retried as a whole and
- * events replayed after a restore converge to the same result. Buffered writes are flushed on
- * every checkpoint, which gives at-least-once delivery.
+ * <ul>
+ *   <li>{@code DELETE_INSERT} (default): per chunk of ids, {@code deleteMany({_id: {$in}})} then
+ *       {@code insertMany} of the final documents. On DocumentDB this is about 40x faster than
+ *       one statement per document.
+ *   <li>{@code UPSERT}: ordered {@code replaceOne(upsert)} / {@code deleteOne} per row.
+ * </ul>
+ *
+ * <p>Both modes are idempotent, so a failed write is simply retried and events replayed after a
+ * restore converge to the same result. Buffered writes are flushed on every checkpoint, which
+ * gives at-least-once delivery.
  */
 @Slf4j
 public class DocumentDBSinkWriter implements SinkWriter<SeaTunnelRow, Void, Void> {
 
     private static final long MAX_BACKOFF_MS = 30_000L;
-    private static final ReplaceOptions UPSERT = new ReplaceOptions().upsert(true);
+    /** Ids per deleteMany / insertMany pair, keeps every command far below the 16 MB limit. */
+    private static final int DELETE_INSERT_CHUNK = 1000;
+
+    private static final int DUPLICATE_KEY = 11000;
     private static final BulkWriteOptions ORDERED = new BulkWriteOptions().ordered(true);
+    private static final InsertManyOptions UNORDERED = new InsertManyOptions().ordered(false);
 
     private final SinkSettings settings;
     private final MongoClient client;
-    /** Insertion ordered so writes of one collection keep their order. */
-    private final Map<MongoNamespace, List<WriteModel<BsonDocument>>> buffer =
-            new LinkedHashMap<>();
+    private final Map<MongoNamespace, WriteBatch> buffer = new LinkedHashMap<>();
 
     private int buffered;
     private long lastFlushMs = System.currentTimeMillis();
@@ -78,40 +90,38 @@ public class DocumentDBSinkWriter implements SinkWriter<SeaTunnelRow, Void, Void
                         settings.getTlsCaFile(),
                         "seatunnel-documentdb-writer-" + context.getIndexOfSubtask());
         context.registerFlushAction(this::flush);
+        log.info(
+                "DocumentDB writer {} uses write_mode {}",
+                context.getIndexOfSubtask(),
+                settings.getWriteMode());
     }
 
     @Override
     public synchronized void write(SeaTunnelRow row) {
-        WriteModel<BsonDocument> model = toWriteModel(row);
-        if (model != null) {
+        RowKind kind = row.getRowKind();
+        if (kind == RowKind.INSERT || kind == RowKind.UPDATE_AFTER || kind == RowKind.DELETE) {
             String database =
                     settings.getDatabase() != null
                             ? settings.getDatabase()
                             : (String) row.getField(settings.getDatabaseIndex());
             String collection = (String) row.getField(settings.getCollectionIndex());
-            buffer.computeIfAbsent(new MongoNamespace(database, collection), k -> new ArrayList<>())
-                    .add(model);
+            WriteBatch batch =
+                    buffer.computeIfAbsent(
+                            new MongoNamespace(database, collection), k -> new WriteBatch());
+            BsonValue id = BsonCodec.valueFromJson((String) row.getField(settings.getIdIndex()));
+            if (kind == RowKind.DELETE) {
+                batch.delete(id);
+            } else {
+                batch.upsert(
+                        id,
+                        BsonCodec.documentFromJson(
+                                (String) row.getField(settings.getDocumentIndex())));
+            }
             buffered++;
         }
         if (buffered >= settings.getBatchSize()
                 || System.currentTimeMillis() - lastFlushMs >= settings.getBatchIntervalMs()) {
             flush();
-        }
-    }
-
-    private WriteModel<BsonDocument> toWriteModel(SeaTunnelRow row) {
-        BsonValue id = BsonCodec.valueFromJson((String) row.getField(settings.getIdIndex()));
-        BsonDocument filter = new BsonDocument("_id", id);
-        switch (row.getRowKind()) {
-            case INSERT:
-            case UPDATE_AFTER:
-                BsonDocument document =
-                        BsonCodec.documentFromJson((String) row.getField(settings.getDocumentIndex()));
-                return new ReplaceOneModel<>(filter, document, UPSERT);
-            case DELETE:
-                return new DeleteOneModel<>(filter);
-            default:
-                return null;
         }
     }
 
@@ -121,8 +131,12 @@ public class DocumentDBSinkWriter implements SinkWriter<SeaTunnelRow, Void, Void
             lastFlushMs = System.currentTimeMillis();
             return;
         }
-        for (Map.Entry<MongoNamespace, List<WriteModel<BsonDocument>>> entry : buffer.entrySet()) {
-            bulkWriteWithRetry(entry.getKey(), entry.getValue());
+        for (Map.Entry<MongoNamespace, WriteBatch> entry : buffer.entrySet()) {
+            if (settings.getWriteMode() == WriteMode.DELETE_INSERT) {
+                deleteInsertWithRetry(entry.getKey(), entry.getValue());
+            } else {
+                bulkWriteWithRetry(entry.getKey(), entry.getValue().operations());
+            }
         }
         written += buffered;
         log.debug("Flushed {} write(s), {} in total", buffered, written);
@@ -131,13 +145,75 @@ public class DocumentDBSinkWriter implements SinkWriter<SeaTunnelRow, Void, Void
         lastFlushMs = System.currentTimeMillis();
     }
 
+    /**
+     * Applies the final state of every id: {@code deleteMany} of all ids of a chunk, then {@code
+     * insertMany} of the documents that still exist. Both statements are retried together, which
+     * is idempotent.
+     *
+     * <p>If the insert reports only duplicate keys, the chunk is replayed with its original
+     * ordered operations instead. This covers ids that MongoDB treats as equal while BSON does
+     * not (for example {@code 1} and {@code NumberLong(1)} in the same batch). Other per-document
+     * errors (unique index violation, document too large) fail the job.
+     */
+    private void deleteInsertWithRetry(MongoNamespace ns, WriteBatch batch) {
+        MongoCollection<BsonDocument> collection = collection(ns);
+        List<BsonValue> ids = batch.ids();
+        for (int from = 0; from < ids.size(); from += DELETE_INSERT_CHUNK) {
+            List<BsonValue> chunk = ids.subList(from, Math.min(ids.size(), from + DELETE_INSERT_CHUNK));
+            List<BsonDocument> documents = batch.documents(chunk);
+            BsonDocument filter = new BsonDocument("_id", new BsonDocument("$in", new BsonArray(chunk)));
+            int attempt = 0;
+            while (true) {
+                try {
+                    collection.deleteMany(filter);
+                    if (!documents.isEmpty()) {
+                        collection.insertMany(documents, UNORDERED);
+                    }
+                    break;
+                } catch (MongoBulkWriteException e) {
+                    if (!e.getWriteErrors().isEmpty() && onlyDuplicateKeys(e)) {
+                        log.warn(
+                                "insertMany into {} reported {} duplicate key(s), replaying {} id(s)"
+                                        + " with ordered upserts",
+                                ns.getFullName(),
+                                e.getWriteErrors().size(),
+                                chunk.size());
+                        bulkWriteWithRetry(ns, batch.operations(chunk));
+                        break;
+                    }
+                    if (!e.getWriteErrors().isEmpty()) {
+                        throw new CosmosMongoConnectorException(
+                                WRITE_FAILED,
+                                "Insert into " + ns.getFullName() + " rejected: " + e.getWriteErrors(),
+                                e);
+                    }
+                    attempt = backoffOrFail(ns, attempt, e);
+                } catch (MongoException e) {
+                    attempt = backoffOrFail(ns, attempt, e);
+                }
+            }
+        }
+    }
+
+    private static boolean onlyDuplicateKeys(MongoBulkWriteException e) {
+        for (BulkWriteError error : e.getWriteErrors()) {
+            if (error.getCode() != DUPLICATE_KEY) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private MongoCollection<BsonDocument> collection(MongoNamespace ns) {
+        return client.getDatabase(ns.getDatabaseName())
+                .getCollection(ns.getCollectionName(), BsonDocument.class);
+    }
+
     private void bulkWriteWithRetry(MongoNamespace ns, List<WriteModel<BsonDocument>> models) {
         int attempt = 0;
         while (true) {
             try {
-                client.getDatabase(ns.getDatabaseName())
-                        .getCollection(ns.getCollectionName(), BsonDocument.class)
-                        .bulkWrite(models, ORDERED);
+                collection(ns).bulkWrite(models, ORDERED);
                 return;
             } catch (MongoBulkWriteException e) {
                 // Per-document errors (document too large, unique index violation, ...) fail

@@ -50,6 +50,16 @@ public class DocumentDBSinkOptions {
                             "PEM bundle used to verify the DocumentDB certificate, e.g. the"
                                     + " global-bundle.pem downloaded from AWS.");
 
+    public static final Option<WriteMode> WRITE_MODE =
+            Options.key("write_mode")
+                    .enumType(WriteMode.class)
+                    .defaultValue(WriteMode.DELETE_INSERT)
+                    .withDescription(
+                            "delete_insert: per batch, deleteMany by _id then insertMany the final"
+                                    + " documents (fast on DocumentDB, documents are briefly absent);"
+                                    + " upsert: one replaceOne(upsert)/deleteOne per row (slow on"
+                                    + " DocumentDB, no gap).");
+
     public static final Option<Integer> BATCH_SIZE =
             Options.key("batch_size")
                     .intType()

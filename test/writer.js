@@ -1,5 +1,5 @@
 // Continuous mixed workload. Vars: SECONDS_TO_RUN, DELETES (true/false)
-const d = db.getSiblingDB("shop");
+const d = db.getSiblingDB(typeof DB === "undefined" ? "shop" : DB);
 const end = Date.now() + SECONDS_TO_RUN * 1000;
 let n = 0, ins = 0, upd = 0, rep = 0, del = 0;
 while (Date.now() < end) {

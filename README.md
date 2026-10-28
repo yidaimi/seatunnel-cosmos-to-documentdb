@@ -5,7 +5,7 @@ Apache SeaTunnel 3.0.0 插件：把 **Azure Cosmos DB for MongoDB** 同步到 **
 | 插件 | 类型 | 作用 |
 |---|---|---|
 | `CosmosMongo` | Source | 全量快照（按 `_id` 排序，可断点续扫）+ change stream 增量 |
-| `DocumentDB`  | Sink   | 按 `_id` 做 `replaceOne(upsert)` / `deleteOne`，幂等写入 |
+| `DocumentDB`  | Sink   | 默认按批次执行 `deleteMany($in)` + `insertMany`（可选逐条 `replaceOne(upsert)` / `deleteOne`），幂等写入 |
 
 ## 工作原理
 
@@ -96,6 +96,7 @@ $ST/bin/seatunnel.sh --config my-job.conf -r <jobId> --async   # 从 savepoint �
 | `uri` | 必填 | DocumentDB 连接串（`tls=true&retryWrites=false`） |
 | `database` | 源库名 | 目标库，省略时沿用每行的源库名 |
 | `tls_ca_file` | - | DocumentDB CA 证书，例如 `global-bundle.pem`（Java driver 会忽略 URI 里的 `tlsCAFile`） |
+| `write_mode` | `delete_insert` | `delete_insert`：每批每个 `_id` 只保留最终状态，再执行 `deleteMany($in)` + `insertMany`，在 DocumentDB 上比逐条写快约 40 倍，但同一批文档在两步之间会短暂查不到；`upsert`：逐条 `replaceOne(upsert)` / `deleteOne`，目标端不会出现文档短暂缺失，但在 DocumentDB 上只有约 400 条/秒 |
 | `batch_size` | 1000 | 缓存多少条写操作后触发一次 bulkWrite |
 | `batch_interval_ms` | 1000 | 缓存写操作的最长停留时间；每次 checkpoint 也会 flush |
 | `max_retries` / `retry_backoff_ms` | 5 / 1000 | bulkWrite 失败重试（单文档错误比如超大文档、唯一索引冲突，不重试直接报错） |

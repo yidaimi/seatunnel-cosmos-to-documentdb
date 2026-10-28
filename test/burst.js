@@ -1,5 +1,6 @@
 // Inserts N docs into shop.orders as fast as possible, then reports when the target has them.
-const s = db.getSiblingDB("shop"), t = new Mongo(DST).getDB("shop");
+const DBN = typeof DB === "undefined" ? "shop" : DB;
+const s = db.getSiblingDB(DBN), t = new Mongo(DST).getDB(DBN);
 const before = s.orders.countDocuments(), t0 = Date.now();
 for (let b = 0; b < N / 1000; b++) { const a = []; for (let i = 0; i < 1000; i++) a.push({ burst: true, i: b * 1000 + i, at: new Date() }); s.orders.insertMany(a); }
 const t1 = Date.now(), target = before + N;

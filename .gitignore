@@ -4,6 +4,7 @@ target/
 # Job configs with real credentials (keep them local only)
 test/job-cosmos-docdb.conf
 test/job-local-to-docdb.conf
+test/job-azure-docdb.conf
 *.secret.conf
 
 # IDE / OS

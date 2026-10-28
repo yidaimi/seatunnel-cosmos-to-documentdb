@@ -1,5 +1,5 @@
 // Seeds the local source with collections covering several BSON types and _id types.
-const d = db.getSiblingDB("shop");
+const d = db.getSiblingDB(typeof DB === "undefined" ? "shop" : DB);
 d.dropDatabase();
 const orders = [];
 for (let i = 0; i < 20000; i++) {

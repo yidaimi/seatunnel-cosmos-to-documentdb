@@ -31,6 +31,7 @@ import static org.apache.seatunnel.connectors.seatunnel.cosmosmongo.config.Docum
 import static org.apache.seatunnel.connectors.seatunnel.cosmosmongo.config.DocumentDBSinkOptions.RETRY_BACKOFF_MS;
 import static org.apache.seatunnel.connectors.seatunnel.cosmosmongo.config.DocumentDBSinkOptions.TLS_CA_FILE;
 import static org.apache.seatunnel.connectors.seatunnel.cosmosmongo.config.DocumentDBSinkOptions.URI;
+import static org.apache.seatunnel.connectors.seatunnel.cosmosmongo.config.DocumentDBSinkOptions.WRITE_MODE;
 
 public class DocumentDBSinkFactory implements TableSinkFactory<SeaTunnelRow, Void, Void, Void> {
 
@@ -46,6 +47,7 @@ public class DocumentDBSinkFactory implements TableSinkFactory<SeaTunnelRow, Voi
                 .optional(
                         DATABASE,
                         TLS_CA_FILE,
+                        WRITE_MODE,
                         BATCH_SIZE,
                         BATCH_INTERVAL_MS,
                         MAX_RETRIES,
